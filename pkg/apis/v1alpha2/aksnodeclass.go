@@ -44,6 +44,10 @@ type AKSNodeClassSpec struct {
 	// Tags to be applied on Azure resources like instances.
 	// +optional
 	Tags map[string]string `json:"tags,omitempty"`
+	// Kubelet defines args to be used when configuring kubelet on provisioned nodes.
+	// They are a subset of the upstream types, recognizing not all options may be supported.
+	// Wherever possible, the types and names should reflect the upstream kubelet types.
+	Kubelet *KubeletConfiguration `json:"kubelet,omitempty"` 
 }
 
 // AKSNodeClass is the Schema for the AKSNodeClass API
@@ -72,4 +76,16 @@ type AKSNodeClassList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []AKSNodeClass `json:"items"`
+}
+
+// Kubelet defines args to be used when configuring kubelet on provisioned nodes.
+// They are a subset of the upstream types, recognizing not all options may be supported.
+// Wherever possible, the types and names should reflect the upstream kubelet types.
+type KubeletConfiguration struct {
+	// MaxPods is an override for the maximum number of pods that can run on
+	// a worker node instance.
+	// +kubebuilder:validation:Minimum:=0
+	// +kubebuilder:validation:Maximum:=250
+	// +kubebuilder:default=250
+	MaxPods *int `json:"maxPods,omitempty"`
 }
