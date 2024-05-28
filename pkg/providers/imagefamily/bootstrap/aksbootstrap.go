@@ -25,6 +25,7 @@ import (
 	"text/template"
 
 	"github.com/Azure/karpenter-provider-azure/pkg/utils"
+	"github.com/blang/semver/v4"
 	"github.com/samber/lo"
 	v1 "k8s.io/api/core/v1"
 	"knative.dev/pkg/ptr"
@@ -103,7 +104,7 @@ type NodeBootstrapVariables struct {
 	KubernetesVersion                 string   // ?   cluster/node pool specific, derived from user input
 	HyperkubeURL                      string   // -   should be unnecessary
 	KubeBinaryURL                     string   // -   necessary only for non-cached versions / static-ish
-	CredentialProviderDownloadURL	  string   // -	  necessary only for non-cached versions / static-ish
+	CredentialProviderDownloadURL     string   // -	  necessary only for non-cached versions / static-ish
 	CustomKubeBinaryURL               string   // -   unnecessary
 	KubeproxyURL                      string   // -   should be unnecessary or bug
 	APIServerPublicKey                string   // -   unique per cluster, actually not sure best way to extract? [should not be needed on agent nodes]
@@ -437,7 +438,7 @@ func (a AKS) applyOptions(nbv *NodeBootstrapVariables) {
 	nbv.KubeBinaryURL = kubeBinaryURL(a.KubernetesVersion, a.Arch)
 	nbv.VNETCNILinuxPluginsURL = fmt.Sprintf("%s/azure-cni/v1.4.32/binaries/azure-vnet-cni-linux-%s-v1.4.32.tgz", globalAKSMirror, a.Arch)
 	nbv.CNIPluginsURL = fmt.Sprintf("%s/cni-plugins/v1.1.1/binaries/cni-plugins-linux-%s-v1.1.1.tgz", globalAKSMirror, a.Arch)
-	
+
 	nbv.CredentialProviderDownloadURL = fmt.Sprintf("https://acs-mirror.azureedge.net/cloud-provider-azure/%s/binaries/azure-acr-credential-provider-linux-amd64-v%s.tar.gz", nbv.KubernetesVersion, nbv.KubernetesVersion)
 	// calculated values
 	nbv.EnsureNoDupePromiscuousBridge = nbv.NeedsContainerd && nbv.NetworkPlugin == "kubenet" && nbv.NetworkPolicy != "calico"
