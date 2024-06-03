@@ -42,8 +42,10 @@ import (
 
 	"github.com/Azure/skewer"
 	"github.com/alecthomas/units"
+	v1 "k8s.io/api/core/v1"
 	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
+	"sigs.k8s.io/karpenter/pkg/scheduling"
 	"sigs.k8s.io/karpenter/pkg/utils/pretty"
 )
 
@@ -161,8 +163,19 @@ func (p *Provider) createOfferings(sku *skewer.SKU, zones sets.Set[string]) []cl
 		spotPrice, spotOk := p.pricingProvider.SpotPrice(*sku.Name)
 		availableOnDemand := onDemandOk && !p.unavailableOfferings.IsUnavailable(*sku.Name, zone, corev1beta1.CapacityTypeOnDemand)
 		availableSpot := spotOk && !p.unavailableOfferings.IsUnavailable(*sku.Name, zone, corev1beta1.CapacityTypeSpot)
-		offerings = append(offerings, cloudprovider.Offering{Zone: zone, CapacityType: corev1beta1.CapacityTypeSpot, Price: spotPrice, Available: availableSpot})
-		offerings = append(offerings, cloudprovider.Offering{Zone: zone, CapacityType: corev1beta1.CapacityTypeOnDemand, Price: onDemandPrice, Available: availableOnDemand})
+		offerings = append(offerings, cloudprovider.Offering{
+				Requirements: scheduling.NewRequirements(
+					scheduling.NewRequirement(corev1beta1.CapacityTypeLabelKey, v1.NodeSelectorOpIn, corev1beta1.CapacityTypeSpot),
+					scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, zone),
+				),
+			Price: spotPrice, Available: availableSpot})
+
+		offerings = append(offerings, cloudprovider.Offering{
+			Requirements: scheduling.NewRequirements(
+					scheduling.NewRequirement(corev1beta1.CapacityTypeLabelKey, v1.NodeSelectorOpIn, corev1beta1.CapacityTypeOnDemand),
+					scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, zone),
+				),
+			Price: onDemandPrice, Available: availableOnDemand})
 	}
 	return offerings
 }

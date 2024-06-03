@@ -140,18 +140,15 @@ func computeRequirements(sku *skewer.SKU, vmsize *skewer.VMSizeType, architectur
 		scheduling.NewRequirement(v1.LabelInstanceTypeStable, v1.NodeSelectorOpIn, sku.GetName()),
 		scheduling.NewRequirement(v1.LabelArchStable, v1.NodeSelectorOpIn, getArchitecture(architecture)),
 		scheduling.NewRequirement(v1.LabelOSStable, v1.NodeSelectorOpIn, string(v1.Linux)),
-		scheduling.NewRequirement(
-			v1.LabelTopologyZone,
-			v1.NodeSelectorOpIn,
-			lo.Map(offerings.Available(),
-				func(o cloudprovider.Offering, _ int) string { return o.Zone })...),
+		scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, lo.Map(offerings.Available(), func(o cloudprovider.Offering, _ int) string {
+			return o.Requirements.Get(v1.LabelTopologyZone).Any()
+		})...),
 		scheduling.NewRequirement(v1.LabelTopologyRegion, v1.NodeSelectorOpIn, region),
 
 		// Well Known to Karpenter
-		scheduling.NewRequirement(
-			corev1beta1.CapacityTypeLabelKey,
-			v1.NodeSelectorOpIn,
-			lo.Map(offerings.Available(), func(o cloudprovider.Offering, _ int) string { return o.CapacityType })...),
+		scheduling.NewRequirement(corev1beta1.CapacityTypeLabelKey, v1.NodeSelectorOpIn, lo.Map(offerings.Available(), func(o cloudprovider.Offering, _ int) string {
+			return o.Requirements.Get(corev1beta1.CapacityTypeLabelKey).Any()
+		})...),
 
 		// Well Known to Azure
 		scheduling.NewRequirement(v1alpha2.LabelSKUCPU, v1.NodeSelectorOpIn, fmt.Sprint(vcpuCount(sku))),
