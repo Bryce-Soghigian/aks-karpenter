@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/tools/record"
 
 	"github.com/Azure/karpenter-provider-azure/pkg/apis"
+	"github.com/Azure/karpenter-provider-azure/pkg/apis/consts"
 	"github.com/Azure/karpenter-provider-azure/pkg/apis/v1alpha2"
 	"github.com/Azure/karpenter-provider-azure/pkg/cloudprovider"
 	"github.com/Azure/karpenter-provider-azure/pkg/operator/options"
@@ -149,7 +150,39 @@ var _ = Describe("InstanceProvider", func() {
 		},
 		ZonalAndNonZonalRegions,
 	)
+	Context("AzureCNI V1", func() {
+		var originalOptions *options.Options
 
+		BeforeEach(func() {
+			originalOptions = options.FromContext(ctx)
+			ctx = options.ToContext(
+				ctx,
+				test.Options(test.OptionsFields{
+					NetworkPlugin:     lo.ToPtr(consts.NetworkPluginAzure),
+					NetworkPluginMode: lo.ToPtr(consts.PodNetworkTypeNone),
+				}))
+		})
+
+		AfterEach(func() {
+			ctx = options.ToContext(ctx, originalOptions)
+		})
+		It("should include 248 secondary ips by default", func() {
+			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+
+			pod := coretest.UnschedulablePod(coretest.PodOptions{})
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, coreProvisioner, pod)
+			ExpectScheduled(ctx, env.Client, pod)
+
+			Expect(azureEnv.NetworkInterfacesAPI.NetworkInterfacesCreateOrUpdateBehavior.CalledWithInput.Len()).To(Equal(1))
+			nic := azureEnv.NetworkInterfacesAPI.NetworkInterfacesCreateOrUpdateBehavior.CalledWithInput.Pop().Interface
+			Expect(nic).ToNot(BeNil())
+			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+
+			// AzureCNI V1 has a DefaultMaxPods of 250, then we dont need to generate
+			// ip configurations for kube-proxy + ip-masq-agent
+			Expect(len(nic.Properties.IPConfigurations)).To(Equal(248))
+		})
+	})
 	It("should create VM and NIC with valid ARM tags", func() {
 		ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 

@@ -514,7 +514,26 @@ var _ = Describe("InstanceType Provider", func() {
 		AfterEach(func() {
 			ctx = options.ToContext(ctx, originalOptions)
 		})
+		It("should not include cilium or azure cni vnet labels", func() {
+			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+			pod := coretest.UnschedulablePod()
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, coreProvisioner, pod)
+			ExpectScheduled(ctx, env.Client, pod)
 
+			Expect(azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Len()).To(Equal(1))
+			vm := azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Pop().VM
+			customData := *vm.Properties.OSProfile.CustomData
+			Expect(customData).ToNot(BeNil())
+			decodedBytes, err := base64.StdEncoding.DecodeString(customData)
+			Expect(err).To(Succeed())
+			decodedString := string(decodedBytes[:])
+			// Since the network plugin is not "azure" it should not include the following kubeletLabels
+			Expect(decodedString).To(Not(SatisfyAny(
+				ContainSubstring("kubernetes.azure.com/network-subnet=karpentersub"),
+				ContainSubstring("kubernetes.azure.com/nodenetwork-vnetguid=test-vnet-guid"),
+				ContainSubstring("kubernetes.azure.com/podnetwork-type=overlay"),
+			)))
+		})
 		It("should support provisioning with kubeletConfig, computeResources and maxPods not specified", func() {
 			nodePool.Spec.Template.Spec.Kubelet = &corev1beta1.KubeletConfiguration{
 				PodsPerCore: lo.ToPtr(int32(110)),
@@ -1020,6 +1039,26 @@ var _ = Describe("InstanceType Provider", func() {
 					Expect(nicDeleteOption).To(Not(BeNil()))
 					Expect(lo.FromPtr(nicDeleteOption)).To(Equal(armcompute.DeleteOptionsDelete))
 				}
+			})
+			It("should not unneeded secondary ips for azure cni with overlay", func() {
+				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+				pod := coretest.UnschedulablePod()
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, coreProvisioner, pod)
+				ExpectScheduled(ctx, env.Client, pod)
+
+				Expect(azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Len()).To(Equal(1))
+				vm := azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Pop().VM
+				Expect(vm.Properties).ToNot(BeNil())
+
+				Expect(vm.Properties.StorageProfile.ImageReference).ToNot(BeNil())
+				Expect(len(vm.Properties.NetworkProfile.NetworkInterfaces)).To(Equal(1))
+				Expect(lo.FromPtr(vm.Properties.NetworkProfile.NetworkInterfaces[0].Properties.Primary)).To(BeTrue())
+				
+				Expect(azureEnv.NetworkInterfacesAPI.NetworkInterfacesCreateOrUpdateBehavior.CalledWithInput.Len()).To(Equal(1))
+				nic := azureEnv.NetworkInterfacesAPI.NetworkInterfacesCreateOrUpdateBehavior.CalledWithInput.Pop().Interface
+				Expect(nic.Properties).ToNot(BeNil())
+
+				Expect(len(nic.Properties.IPConfigurations)).To(Equal(1))
 			})
 		})
 	})
