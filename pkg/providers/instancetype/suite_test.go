@@ -63,7 +63,7 @@ import (
 	"github.com/Azure/karpenter-provider-azure/pkg/providers/imagefamily/bootstrap"
 	"github.com/Azure/karpenter-provider-azure/pkg/providers/instance"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 
 	"github.com/Azure/karpenter-provider-azure/pkg/apis"
 	"github.com/Azure/karpenter-provider-azure/pkg/apis/v1beta1"
@@ -108,8 +108,8 @@ func TestAzure(t *testing.T) {
 	azureEnvNonZonal = test.NewEnvironmentNonZonal(ctx, env)
 
 	fakeClock = &clock.FakeClock{}
-	cloudProvider = cloudprovider.New(azureEnv.InstanceTypesProvider, azureEnv.InstanceProvider, events.NewRecorder(&record.FakeRecorder{}), env.Client, azureEnv.ImageProvider)
-	cloudProviderNonZonal = cloudprovider.New(azureEnvNonZonal.InstanceTypesProvider, azureEnvNonZonal.InstanceProvider, events.NewRecorder(&record.FakeRecorder{}), env.Client, azureEnvNonZonal.ImageProvider)
+	cloudProvider = cloudprovider.New(azureEnv.InstanceTypesProvider, azureEnv.VMInstanceProvider, events.NewRecorder(&record.FakeRecorder{}), env.Client, azureEnv.ImageProvider)
+	cloudProviderNonZonal = cloudprovider.New(azureEnvNonZonal.InstanceTypesProvider, azureEnvNonZonal.VMInstanceProvider, events.NewRecorder(&record.FakeRecorder{}), env.Client, azureEnvNonZonal.ImageProvider)
 
 	cluster = state.NewCluster(fakeClock, env.Client, cloudProvider)
 	clusterNonZonal = state.NewCluster(fakeClock, env.Client, cloudProviderNonZonal)
@@ -172,7 +172,7 @@ var _ = Describe("InstanceType Provider", func() {
 			}))
 			azureEnv = test.NewEnvironment(ctx, env)
 			fakeClock = &clock.FakeClock{}
-			cloudProvider = cloudprovider.New(azureEnv.InstanceTypesProvider, azureEnv.InstanceProvider, events.NewRecorder(&record.FakeRecorder{}), env.Client, azureEnv.ImageProvider)
+			cloudProvider = cloudprovider.New(azureEnv.InstanceTypesProvider, azureEnv.VMInstanceProvider, events.NewRecorder(&record.FakeRecorder{}), env.Client, azureEnv.ImageProvider)
 			cluster = state.NewCluster(fakeClock, env.Client, cloudProvider)
 			coreProvisioner = provisioning.NewProvisioner(env.Client, events.NewRecorder(&record.FakeRecorder{}), cloudProvider, cluster, fakeClock)
 		})
@@ -180,7 +180,7 @@ var _ = Describe("InstanceType Provider", func() {
 			ctx = options.ToContext(ctx, test.Options())
 			azureEnv = test.NewEnvironment(ctx, env)
 			fakeClock = &clock.FakeClock{}
-			cloudProvider = cloudprovider.New(azureEnv.InstanceTypesProvider, azureEnv.InstanceProvider, events.NewRecorder(&record.FakeRecorder{}), env.Client, azureEnv.ImageProvider)
+			cloudProvider = cloudprovider.New(azureEnv.InstanceTypesProvider, azureEnv.VMInstanceProvider, events.NewRecorder(&record.FakeRecorder{}), env.Client, azureEnv.ImageProvider)
 			cluster = state.NewCluster(fakeClock, env.Client, cloudProvider)
 			coreProvisioner = provisioning.NewProvisioner(env.Client, events.NewRecorder(&record.FakeRecorder{}), cloudProvider, cluster, fakeClock)
 		})
@@ -245,6 +245,32 @@ var _ = Describe("InstanceType Provider", func() {
 				ContainSubstring("kubernetes.azure.com/podnetwork-type=overlay"),
 				ContainSubstring("kubernetes.azure.com/azure-cni-overlay=true"),
 			))
+		})
+		It("should include stateless CNI label for kubernetes 1.34+ set to true", func() {
+			// Set kubernetes version to 1.34.0
+			nodeClass.Status.KubernetesVersion = "1.34.0"
+			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+			pod := coretest.UnschedulablePod()
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, coreProvisioner, pod)
+			ExpectScheduled(ctx, env.Client, pod)
+
+			decodedString := ExpectDecodedCustomData(azureEnv)
+			Expect(decodedString).To(SatisfyAll(
+				ContainSubstring("kubernetes.azure.com/network-stateless-cni=true"),
+			))
+		})
+		It("should include stateless CNI label for kubernetes < 1.34 set to false", func() {
+			// Set kubernetes version to 1.33.0
+			nodeClass.Status.KubernetesVersion = "1.33.0"
+			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+			pod := coretest.UnschedulablePod()
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, coreProvisioner, pod)
+			ExpectScheduled(ctx, env.Client, pod)
+			decodedString := ExpectDecodedCustomData(azureEnv)
+			Expect(decodedString).To(SatisfyAll(
+				ContainSubstring("kubernetes.azure.com/network-stateless-cni=false"),
+			))
+
 		})
 		It("should use the subnet specified in the nodeclass", func() {
 			nodeClass.Spec.VNETSubnetID = lo.ToPtr("/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/sillygeese/providers/Microsoft.Network/virtualNetworks/karpenter/subnets/nodeclassSubnet")
@@ -543,6 +569,37 @@ var _ = Describe("InstanceType Provider", func() {
 		})
 	})
 
+	Context("additional-tags", func() {
+		It("should add additional tags to the node", func() {
+			ctx = options.ToContext(ctx, test.Options(test.OptionsFields{
+				AdditionalTags: map[string]string{
+					"karpenter.azure.com/test-tag": "test-value",
+				},
+			}))
+
+			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+			pod := coretest.UnschedulablePod()
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, coreProvisioner, pod)
+			ExpectScheduled(ctx, env.Client, pod)
+
+			vm := azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Pop().VM
+			Expect(vm).NotTo(BeNil())
+			Expect(vm.Tags).To(Equal(map[string]*string{
+				"karpenter.azure.com_test-tag": lo.ToPtr("test-value"),
+				"karpenter.azure.com_cluster":  lo.ToPtr("test-cluster"),
+				"karpenter.sh_nodepool":        lo.ToPtr(nodePool.Name),
+			}))
+
+			nic := azureEnv.NetworkInterfacesAPI.NetworkInterfacesCreateOrUpdateBehavior.CalledWithInput.Pop()
+			Expect(nic).NotTo(BeNil())
+			Expect(nic.Interface.Tags).To(Equal(map[string]*string{
+				"karpenter.azure.com_test-tag": lo.ToPtr("test-value"),
+				"karpenter.azure.com_cluster":  lo.ToPtr("test-cluster"),
+				"karpenter.sh_nodepool":        lo.ToPtr(nodePool.Name),
+			}))
+		})
+	})
+
 	Context("Filtering in InstanceType Provider List", func() {
 		var instanceTypes corecloudprovider.InstanceTypes
 		var err error
@@ -589,6 +646,51 @@ var _ = Describe("InstanceType Provider", func() {
 		})
 		It("should include AKSUbuntu GPU SKUs in list results", func() {
 			Expect(instanceTypes).Should(ContainElement(WithTransform(getName, Equal("Standard_NC16as_T4_v3"))))
+		})
+	})
+
+	Context("Filtering by Encryption at Host", func() {
+		var instanceTypes corecloudprovider.InstanceTypes
+		var err error
+		getName := func(instanceType *corecloudprovider.InstanceType) string { return instanceType.Name }
+
+		Context("when encryption at host is enabled", func() {
+			BeforeEach(func() {
+				nodeClassWithEncryption := test.AKSNodeClass()
+				if nodeClassWithEncryption.Spec.Security == nil {
+					nodeClassWithEncryption.Spec.Security = &v1beta1.Security{}
+				}
+				nodeClassWithEncryption.Spec.Security.EncryptionAtHost = lo.ToPtr(true)
+				ExpectApplied(ctx, env.Client, nodeClassWithEncryption)
+				instanceTypes, err = azureEnv.InstanceTypesProvider.List(ctx, nodeClassWithEncryption)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			It("should only include SKUs that support encryption at host", func() {
+				// Standard_D2_v2 does not support encryption at host, so it should be filtered out
+				Expect(instanceTypes).ShouldNot(ContainElement(WithTransform(getName, Equal("Standard_D2_v2"))))
+				// Standard_D2s_v3 supports encryption at host, so it should be included
+				Expect(instanceTypes).Should(ContainElement(WithTransform(getName, Equal("Standard_D2s_v3"))))
+				// Standard_D2_v5 supports encryption at host, so it should be included
+				Expect(instanceTypes).Should(ContainElement(WithTransform(getName, Equal("Standard_D2_v5"))))
+			})
+		})
+
+		Context("when encryption at host is disabled or not set", func() {
+			It("should include SKUs regardless of encryption at host support", func() {
+				nodeClassWithoutEncryption := test.AKSNodeClass()
+				// default is disabled when Security is nil or EncryptionAtHost is nil
+				ExpectApplied(ctx, env.Client, nodeClassWithoutEncryption)
+				instanceTypes, err = azureEnv.InstanceTypesProvider.List(ctx, nodeClassWithoutEncryption)
+				Expect(err).ToNot(HaveOccurred())
+
+				// Standard_D2_v2 does not support encryption at host, but should still be included when encryption is not required
+				Expect(instanceTypes).Should(ContainElement(WithTransform(getName, Equal("Standard_D2_v2"))))
+				// Standard_D2s_v3 supports encryption at host and should be included
+				Expect(instanceTypes).Should(ContainElement(WithTransform(getName, Equal("Standard_D2s_v3"))))
+				// Standard_D2_v5 supports encryption at host and should be included
+				Expect(instanceTypes).Should(ContainElement(WithTransform(getName, Equal("Standard_D2_v5"))))
+			})
 		})
 	})
 
@@ -1389,6 +1491,9 @@ var _ = Describe("InstanceType Provider", func() {
 				v1beta1.LabelSKUGPUCount:                  "1",
 				v1beta1.LabelSKUCPU:                       "24",
 				v1beta1.LabelSKUMemory:                    "8192",
+				// AKS domain.
+				v1beta1.AKSLabelCPU:    "24",
+				v1beta1.AKSLabelMemory: "8192",
 				// Deprecated Labels
 				v1.LabelFailureDomainBetaRegion:    fake.Region,
 				v1.LabelFailureDomainBetaZone:      fakeZone1,
@@ -1467,7 +1572,7 @@ var _ = Describe("InstanceType Provider", func() {
 				UseSIG: lo.ToPtr(true),
 			})
 			ctx = options.ToContext(ctx)
-			statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface)
+			statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface, azureEnv.SubnetsAPI)
 
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			ExpectObjectReconciled(ctx, env.Client, statusController, nodeClass)
@@ -1516,7 +1621,7 @@ var _ = Describe("InstanceType Provider", func() {
 				UseSIG: lo.ToPtr(true),
 			})
 			ctx = options.ToContext(ctx)
-			statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface)
+			statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface, azureEnv.SubnetsAPI)
 
 			nodeClass.Spec.ImageFamily = lo.ToPtr(imageFamily)
 			coretest.ReplaceRequirements(nodePool, karpv1.NodeSelectorRequirementWithMinValues{
@@ -1550,7 +1655,10 @@ var _ = Describe("InstanceType Provider", func() {
 		)
 		DescribeTable("should select the right image for a given instance type",
 			func(instanceType string, imageFamily string, expectedImageDefinition string, expectedGalleryURL string) {
-				statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface)
+				statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface, azureEnv.SubnetsAPI)
+				if expectUseAzureLinux3 && expectedImageDefinition == azureLinuxGen2ArmImageDefinition {
+					Skip("AzureLinux3 ARM64 VHD is not available in CIG")
+				}
 				nodeClass.Spec.ImageFamily = lo.ToPtr(imageFamily)
 				coretest.ReplaceRequirements(nodePool, karpv1.NodeSelectorRequirementWithMinValues{
 					NodeSelectorRequirement: v1.NodeSelectorRequirement{
@@ -1951,7 +2059,7 @@ var _ = Describe("InstanceType Provider", func() {
 
 		It("should return error when instance type resolution fails", func() {
 			// Create and set up the status controller
-			statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface)
+			statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface, azureEnv.SubnetsAPI)
 
 			// Set NodeClass to Ready
 			nodeClass.StatusConditions().SetTrue(karpv1.ConditionTypeLaunched)
@@ -1960,7 +2068,7 @@ var _ = Describe("InstanceType Provider", func() {
 			// Reconcile the NodeClass to ensure status is updated
 			ExpectObjectReconciled(ctx, env.Client, statusController, nodeClass)
 
-			azureEnv.MockSkuClientSingleton.SKUClient.Error = fmt.Errorf("failed to list SKUs")
+			azureEnv.SKUsAPI.Error = fmt.Errorf("failed to list SKUs")
 
 			nodeClaim := coretest.NodeClaim(karpv1.NodeClaim{
 				ObjectMeta: metav1.ObjectMeta{

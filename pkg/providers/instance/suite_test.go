@@ -19,42 +19,41 @@ package instance_test
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/awslabs/operatorpkg/object"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/samber/lo"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	clock "k8s.io/utils/clock/testing"
-
 	"k8s.io/client-go/tools/record"
-
-	"github.com/Azure/karpenter-provider-azure/pkg/apis"
-	"github.com/Azure/karpenter-provider-azure/pkg/apis/v1beta1"
-	"github.com/Azure/karpenter-provider-azure/pkg/cloudprovider"
-	"github.com/Azure/karpenter-provider-azure/pkg/consts"
-	"github.com/Azure/karpenter-provider-azure/pkg/operator/options"
-	"github.com/Azure/karpenter-provider-azure/pkg/providers/instance"
-	"github.com/Azure/karpenter-provider-azure/pkg/test"
-	. "github.com/Azure/karpenter-provider-azure/pkg/test/expectations"
-
+	clock "k8s.io/utils/clock/testing"
+	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	corecloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/controllers/provisioning"
 	"sigs.k8s.io/karpenter/pkg/controllers/state"
 	"sigs.k8s.io/karpenter/pkg/events"
-
-	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
-	corecloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
-
+	coreoptions "sigs.k8s.io/karpenter/pkg/operator/options"
+	coretest "sigs.k8s.io/karpenter/pkg/test"
 	. "sigs.k8s.io/karpenter/pkg/test/expectations"
 	"sigs.k8s.io/karpenter/pkg/test/v1alpha1"
 	. "sigs.k8s.io/karpenter/pkg/utils/testing"
 
-	coreoptions "sigs.k8s.io/karpenter/pkg/operator/options"
-	coretest "sigs.k8s.io/karpenter/pkg/test"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
+	"github.com/Azure/karpenter-provider-azure/pkg/apis"
+	"github.com/Azure/karpenter-provider-azure/pkg/apis/v1beta1"
+	"github.com/Azure/karpenter-provider-azure/pkg/cloudprovider"
+	"github.com/Azure/karpenter-provider-azure/pkg/consts"
+	"github.com/Azure/karpenter-provider-azure/pkg/fake"
+	"github.com/Azure/karpenter-provider-azure/pkg/operator/options"
+	"github.com/Azure/karpenter-provider-azure/pkg/providers/launchtemplate"
+	"github.com/Azure/karpenter-provider-azure/pkg/test"
+	. "github.com/Azure/karpenter-provider-azure/pkg/test/expectations"
 )
 
 var ctx context.Context
@@ -82,8 +81,8 @@ func TestAzure(t *testing.T) {
 	ctx, stop = context.WithCancel(ctx)
 	azureEnv = test.NewEnvironment(ctx, env)
 	azureEnvNonZonal = test.NewEnvironmentNonZonal(ctx, env)
-	cloudProvider = cloudprovider.New(azureEnv.InstanceTypesProvider, azureEnv.InstanceProvider, events.NewRecorder(&record.FakeRecorder{}), env.Client, azureEnv.ImageProvider)
-	cloudProviderNonZonal = cloudprovider.New(azureEnvNonZonal.InstanceTypesProvider, azureEnvNonZonal.InstanceProvider, events.NewRecorder(&record.FakeRecorder{}), env.Client, azureEnvNonZonal.ImageProvider)
+	cloudProvider = cloudprovider.New(azureEnv.InstanceTypesProvider, azureEnv.VMInstanceProvider, events.NewRecorder(&record.FakeRecorder{}), env.Client, azureEnv.ImageProvider)
+	cloudProviderNonZonal = cloudprovider.New(azureEnvNonZonal.InstanceTypesProvider, azureEnvNonZonal.VMInstanceProvider, events.NewRecorder(&record.FakeRecorder{}), env.Client, azureEnvNonZonal.ImageProvider)
 	fakeClock = &clock.FakeClock{}
 	cluster = state.NewCluster(fakeClock, env.Client, cloudProvider)
 	coreProvisioner = provisioning.NewProvisioner(env.Client, events.NewRecorder(&record.FakeRecorder{}), cloudProvider, cluster, fakeClock)
@@ -95,7 +94,7 @@ var _ = AfterSuite(func() {
 	Expect(env.Stop()).To(Succeed(), "Failed to stop environment")
 })
 
-var _ = Describe("InstanceProvider", func() {
+var _ = Describe("VMInstanceProvider", func() {
 	var nodeClass *v1beta1.AKSNodeClass
 	var nodePool *karpv1.NodePool
 	var nodeClaim *karpv1.NodeClaim
@@ -162,7 +161,7 @@ var _ = Describe("InstanceProvider", func() {
 			instanceTypes = lo.Filter(instanceTypes, func(i *corecloudprovider.InstanceType, _ int) bool { return i.Name == "Standard_D2_v2" })
 
 			// Since all the offerings are unavailable, this should return back an ICE error
-			instance, err := azEnv.InstanceProvider.BeginCreate(ctx, nodeClass, nodeClaim, instanceTypes)
+			instance, err := azEnv.VMInstanceProvider.BeginCreate(ctx, nodeClass, nodeClaim, instanceTypes)
 			Expect(corecloudprovider.IsInsufficientCapacityError(err)).To(BeTrue())
 			Expect(instance).To(BeNil())
 		},
@@ -185,7 +184,7 @@ var _ = Describe("InstanceProvider", func() {
 				newOptions)
 			azureEnv = test.NewEnvironment(ctx, env)
 			cloudProvider = cloudprovider.New(azureEnv.InstanceTypesProvider,
-				azureEnv.InstanceProvider,
+				azureEnv.VMInstanceProvider,
 				events.NewRecorder(&record.FakeRecorder{}),
 				env.Client,
 				azureEnv.ImageProvider,
@@ -343,10 +342,10 @@ var _ = Describe("InstanceProvider", func() {
 
 		Expect(azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Len()).To(Equal(1))
 		vmName := azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Pop().VMName
-		vm, err := azureEnv.InstanceProvider.Get(ctx, vmName)
+		vm, err := azureEnv.VMInstanceProvider.Get(ctx, vmName)
 		Expect(err).To(BeNil())
 		tags := vm.Tags
-		Expect(lo.FromPtr(tags[instance.NodePoolTagKey])).To(Equal(nodePool.Name))
+		Expect(lo.FromPtr(tags[launchtemplate.NodePoolTagKey])).To(Equal(nodePool.Name))
 		Expect(lo.PickBy(tags, func(key string, value *string) bool {
 			return strings.Contains(key, "/") // ARM tags can't contain '/'
 		})).To(HaveLen(0))
@@ -355,17 +354,45 @@ var _ = Describe("InstanceProvider", func() {
 		nic := azureEnv.NetworkInterfacesAPI.NetworkInterfacesCreateOrUpdateBehavior.CalledWithInput.Pop().Interface
 		Expect(nic).ToNot(BeNil())
 		nicTags := nic.Tags
-		Expect(lo.FromPtr(nicTags[instance.NodePoolTagKey])).To(Equal(nodePool.Name))
+		Expect(lo.FromPtr(nicTags[launchtemplate.NodePoolTagKey])).To(Equal(nodePool.Name))
 		Expect(lo.PickBy(nicTags, func(key string, value *string) bool {
 			return strings.Contains(key, "/") // ARM tags can't contain '/'
 		})).To(HaveLen(0))
 	})
+
+	It("should not allow the user to override Karpenter-managed tags", func() {
+		nodeClass.Spec.Tags = map[string]string{
+			"karpenter.azure.com/cluster": "my-override-cluster",
+			"karpenter.sh/nodepool":       "my-override-nodepool",
+		}
+		ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+
+		pod := coretest.UnschedulablePod(coretest.PodOptions{})
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, coreProvisioner, pod)
+		ExpectScheduled(ctx, env.Client, pod)
+
+		Expect(azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Len()).To(Equal(1))
+		vmName := azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Pop().VMName
+		vm, err := azureEnv.VMInstanceProvider.Get(ctx, vmName)
+		Expect(err).To(BeNil())
+		tags := vm.Tags
+		Expect(lo.FromPtr(tags[launchtemplate.NodePoolTagKey])).To(Equal(nodePool.Name))
+		Expect(lo.FromPtr(tags[launchtemplate.KarpenterManagedTagKey])).To(Equal(testOptions.ClusterName))
+
+		Expect(azureEnv.NetworkInterfacesAPI.NetworkInterfacesCreateOrUpdateBehavior.CalledWithInput.Len()).To(Equal(1))
+		nic := azureEnv.NetworkInterfacesAPI.NetworkInterfacesCreateOrUpdateBehavior.CalledWithInput.Pop().Interface
+		Expect(nic).ToNot(BeNil())
+		nicTags := nic.Tags
+		Expect(lo.FromPtr(nicTags[launchtemplate.NodePoolTagKey])).To(Equal(nodePool.Name))
+		Expect(lo.FromPtr(nicTags[launchtemplate.KarpenterManagedTagKey])).To(Equal(testOptions.ClusterName))
+	})
+
 	It("should list nic from karpenter provisioning request", func() {
 		ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 		pod := coretest.UnschedulablePod(coretest.PodOptions{})
 		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, coreProvisioner, pod)
 		ExpectScheduled(ctx, env.Client, pod)
-		interfaces, err := azureEnv.InstanceProvider.ListNics(ctx)
+		interfaces, err := azureEnv.VMInstanceProvider.ListNics(ctx)
 		Expect(err).To(BeNil())
 		Expect(len(interfaces)).To(Equal(1))
 	})
@@ -375,7 +402,7 @@ var _ = Describe("InstanceProvider", func() {
 
 		azureEnv.NetworkInterfacesAPI.NetworkInterfaces.Store(lo.FromPtr(managedNic.ID), *managedNic)
 		azureEnv.NetworkInterfacesAPI.NetworkInterfaces.Store(lo.FromPtr(unmanagedNic.ID), *unmanagedNic)
-		interfaces, err := azureEnv.InstanceProvider.ListNics(ctx)
+		interfaces, err := azureEnv.VMInstanceProvider.ListNics(ctx)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(len(interfaces)).To(Equal(1))
 		Expect(interfaces[0].Name).To(Equal(managedNic.Name))
@@ -453,5 +480,200 @@ var _ = Describe("InstanceProvider", func() {
 		expectedNSGID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/networkSecurityGroups/aks-agentpool-%s-nsg", azureEnv.SubscriptionID, options.FromContext(ctx).NodeResourceGroup, options.FromContext(ctx).ClusterID)
 		Expect(nic.Properties.NetworkSecurityGroup).ToNot(BeNil())
 		Expect(lo.FromPtr(nic.Properties.NetworkSecurityGroup.ID)).To(Equal(expectedNSGID))
+	})
+
+	Context("Update", func() {
+		It("should update only VM when no tags are included", func() {
+			// Ensure that the VM already exists in the fake environment
+			vmName := nodeClaim.Name
+			vm := armcompute.VirtualMachine{
+				ID:   lo.ToPtr(fake.MkVMID(azureEnv.AzureResourceGraphAPI.ResourceGroup, vmName)),
+				Name: lo.ToPtr(vmName),
+				Tags: map[string]*string{
+					"karpenter.azure.com_cluster": lo.ToPtr("test-cluster"),
+				},
+			}
+
+			azureEnv.VirtualMachinesAPI.Instances.Store(*vm.ID, vm)
+
+			ExpectApplied(ctx, env.Client, nodeClaim, nodePool, nodeClass)
+
+			// Update the VM identities
+			err := azureEnv.VMInstanceProvider.Update(ctx, vmName, armcompute.VirtualMachineUpdate{
+				Identity: &armcompute.VirtualMachineIdentity{
+					UserAssignedIdentities: map[string]*armcompute.UserAssignedIdentitiesValue{
+						"/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/sillygeese/providers/Microsoft.ManagedIdentity/userAssignedIdentities/aks-agentpool-00000000-identity": {},
+					},
+				},
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(azureEnv.VirtualMachinesAPI.VirtualMachineUpdateBehavior.CalledWithInput.Len()).To(Equal(1))
+			update := azureEnv.VirtualMachinesAPI.VirtualMachineUpdateBehavior.CalledWithInput.Pop().Updates
+			Expect(update).ToNot(BeNil())
+			Expect(update.Identity).ToNot(BeNil())
+			Expect(update.Identity.UserAssignedIdentities).To(HaveLen(1))
+
+			Expect(azureEnv.NetworkInterfacesAPI.NetworkInterfacesUpdateTagsBehavior.CalledWithInput.Len()).To(Equal(0))
+		})
+
+		It("should update only VM, NIC, and Extensions when tags are included", func() {
+			// Ensure that the VM already exists in the fake environment
+			vmName := nodeClaim.Name
+			vm := armcompute.VirtualMachine{
+				ID:   lo.ToPtr(fake.MkVMID(azureEnv.AzureResourceGraphAPI.ResourceGroup, vmName)),
+				Name: lo.ToPtr(vmName),
+				Tags: map[string]*string{
+					"karpenter.azure.com_cluster": lo.ToPtr("test-cluster"),
+				},
+			}
+			// Ensure that the NIC already exists in the fake environment
+			azureEnv.VirtualMachinesAPI.Instances.Store(*vm.ID, vm)
+			nic := armnetwork.Interface{
+				ID:   lo.ToPtr(fake.MakeNetworkInterfaceID(azureEnv.AzureResourceGraphAPI.ResourceGroup, vmName)),
+				Name: lo.ToPtr(vmName),
+				Tags: map[string]*string{
+					"karpenter.azure.com_cluster": lo.ToPtr("test-cluster"),
+				},
+			}
+			azureEnv.NetworkInterfacesAPI.NetworkInterfaces.Store(*nic.ID, nic)
+
+			// Ensure that the two VM extensions already exist in the fake environment
+			billingExt := armcompute.VirtualMachineExtension{
+				ID:   lo.ToPtr(fake.MakeVMExtensionID(azureEnv.AzureResourceGraphAPI.ResourceGroup, vmName, "computeAksLinuxBilling")),
+				Name: lo.ToPtr("computeAksLinuxBilling"),
+				Tags: map[string]*string{
+					"karpenter.azure.com_cluster": lo.ToPtr("test-cluster"),
+				},
+			}
+			cseExt := armcompute.VirtualMachineExtension{
+				ID:   lo.ToPtr(fake.MakeVMExtensionID(azureEnv.AzureResourceGraphAPI.ResourceGroup, vmName, "cse-agent-karpenter")),
+				Name: lo.ToPtr("cse-agent-karpenter"),
+				Tags: map[string]*string{
+					"karpenter.azure.com_cluster": lo.ToPtr("test-cluster"),
+				},
+			}
+			azureEnv.VirtualMachineExtensionsAPI.Extensions.Store(*billingExt.ID, billingExt)
+			azureEnv.VirtualMachineExtensionsAPI.Extensions.Store(*cseExt.ID, cseExt)
+
+			ExpectApplied(ctx, env.Client, nodeClaim, nodePool, nodeClass)
+
+			// Update the VM tags
+			err := azureEnv.VMInstanceProvider.Update(ctx, vmName, armcompute.VirtualMachineUpdate{
+				Tags: map[string]*string{
+					"karpenter.azure.com_cluster": lo.ToPtr("test-cluster"),
+					"test-tag":                    lo.ToPtr("test-value"),
+				},
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			ExpectInstanceResourcesHaveTags(ctx, vmName, azureEnv, map[string]*string{
+				"karpenter.azure.com_cluster": lo.ToPtr("test-cluster"),
+				"test-tag":                    lo.ToPtr("test-value"),
+			})
+		})
+
+		It("should ignore NotFound errors for computeAksLinuxBilling extension update", func() {
+			// Ensure that the VM already exists in the fake environment
+			vmName := nodeClaim.Name
+			vm := armcompute.VirtualMachine{
+				ID:   lo.ToPtr(fake.MkVMID(azureEnv.AzureResourceGraphAPI.ResourceGroup, vmName)),
+				Name: lo.ToPtr(vmName),
+				Tags: map[string]*string{
+					"karpenter.azure.com_cluster": lo.ToPtr("test-cluster"),
+				},
+			}
+			// Ensure that the NIC already exists in the fake environment
+			azureEnv.VirtualMachinesAPI.Instances.Store(*vm.ID, vm)
+			nic := armnetwork.Interface{
+				ID:   lo.ToPtr(fake.MakeNetworkInterfaceID(azureEnv.AzureResourceGraphAPI.ResourceGroup, vmName)),
+				Name: lo.ToPtr(vmName),
+				Tags: map[string]*string{
+					"karpenter.azure.com_cluster": lo.ToPtr("test-cluster"),
+				},
+			}
+			azureEnv.NetworkInterfacesAPI.NetworkInterfaces.Store(*nic.ID, nic)
+
+			// Ensure that only one extension exists in the env
+			cseExt := armcompute.VirtualMachineExtension{
+				ID:   lo.ToPtr(fake.MakeVMExtensionID(azureEnv.AzureResourceGraphAPI.ResourceGroup, vmName, "cse-agent-karpenter")),
+				Name: lo.ToPtr("cse-agent-karpenter"),
+				Tags: map[string]*string{
+					"karpenter.azure.com_cluster": lo.ToPtr("test-cluster"),
+				},
+			}
+			azureEnv.VirtualMachineExtensionsAPI.Extensions.Store(*cseExt.ID, cseExt)
+			// TODO: This only works because this extension happens to be first in the list of extensions. If it were second it wouldn't work
+			azureEnv.VirtualMachineExtensionsAPI.VirtualMachineExtensionsUpdateBehavior.BeginError.Set(&azcore.ResponseError{StatusCode: http.StatusNotFound}, fake.MaxCalls(1))
+
+			ExpectApplied(ctx, env.Client, nodeClaim, nodePool, nodeClass)
+
+			// Update the VM tags
+			err := azureEnv.VMInstanceProvider.Update(ctx, vmName, armcompute.VirtualMachineUpdate{
+				Tags: map[string]*string{
+					"karpenter.azure.com_cluster": lo.ToPtr("test-cluster"),
+					"test-tag":                    lo.ToPtr("test-value"),
+				},
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			ExpectInstanceResourcesHaveTags(ctx, vmName, azureEnv, map[string]*string{
+				"karpenter.azure.com_cluster": lo.ToPtr("test-cluster"),
+				"test-tag":                    lo.ToPtr("test-value"),
+			})
+		})
+	})
+
+	Context("EncryptionAtHost", func() {
+		It("should create VM with EncryptionAtHost enabled when specified in AKSNodeClass", func() {
+			if nodeClass.Spec.Security == nil {
+				nodeClass.Spec.Security = &v1beta1.Security{}
+			}
+			nodeClass.Spec.Security.EncryptionAtHost = lo.ToPtr(true)
+			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+
+			pod := coretest.UnschedulablePod(coretest.PodOptions{})
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, coreProvisioner, pod)
+			ExpectScheduled(ctx, env.Client, pod)
+
+			Expect(azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Len()).To(Equal(1))
+			vm := azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Pop().VM
+
+			Expect(vm.Properties.SecurityProfile).ToNot(BeNil())
+			Expect(vm.Properties.SecurityProfile.EncryptionAtHost).ToNot(BeNil())
+			Expect(lo.FromPtr(vm.Properties.SecurityProfile.EncryptionAtHost)).To(BeTrue())
+		})
+
+		It("should create VM with EncryptionAtHost disabled when specified in AKSNodeClass", func() {
+			if nodeClass.Spec.Security == nil {
+				nodeClass.Spec.Security = &v1beta1.Security{}
+			}
+			nodeClass.Spec.Security.EncryptionAtHost = lo.ToPtr(false)
+			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+
+			pod := coretest.UnschedulablePod(coretest.PodOptions{})
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, coreProvisioner, pod)
+			ExpectScheduled(ctx, env.Client, pod)
+
+			Expect(azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Len()).To(Equal(1))
+			vm := azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Pop().VM
+
+			Expect(vm.Properties.SecurityProfile).ToNot(BeNil())
+			Expect(vm.Properties.SecurityProfile.EncryptionAtHost).ToNot(BeNil())
+			Expect(lo.FromPtr(vm.Properties.SecurityProfile.EncryptionAtHost)).To(BeFalse())
+		})
+
+		It("should create VM without SecurityProfile when EncryptionAtHost is not specified in AKSNodeClass", func() {
+			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+
+			pod := coretest.UnschedulablePod(coretest.PodOptions{})
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, coreProvisioner, pod)
+			ExpectScheduled(ctx, env.Client, pod)
+
+			Expect(azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Len()).To(Equal(1))
+			vm := azureEnv.VirtualMachinesAPI.VirtualMachineCreateOrUpdateBehavior.CalledWithInput.Pop().VM
+
+			Expect(vm.Properties.SecurityProfile).To(BeNil())
+		})
 	})
 })
