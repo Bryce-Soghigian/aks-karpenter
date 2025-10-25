@@ -69,10 +69,13 @@ var _ = Describe("Hash", func() {
 
 		// Static fields, expect changed hash from base
 		Entry("VNETSubnetID", "13971920214979852468", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{VNETSubnetID: lo.ToPtr("subnet-id-2")}}),
-		Entry("OSDiskSizeGB", "7816855636861645563", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{OSDiskSizeGB: lo.ToPtr(int32(40))}}),
-		Entry("ImageFamily", "15616969746300892810", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{ImageFamily: lo.ToPtr("AzureLinux")}}),
-		Entry("Kubelet", "33638514539106194", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{Kubelet: &v1alpha2.KubeletConfiguration{CPUManagerPolicy: "none"}}}),
-		Entry("MaxPods", "15508761509963240710", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{MaxPods: lo.ToPtr(int32(200))}}),
+		Entry("OSDiskSizeGB", "4088882218923570631", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{OSDiskSizeGB: lo.ToPtr(int32(40))}}),
+		Entry("ImageFamily", "4882190229342614962", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{ImageFamily: lo.ToPtr("AzureLinux")}}),
+		Entry("Kubelet", "8064587433288534078", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{Kubelet: &v1alpha2.KubeletConfiguration{CPUManagerPolicy: "none"}}}),
+		Entry("MaxPods", "6809138630151000128", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{MaxPods: lo.ToPtr(int32(200))}}),
+		Entry("FIPSMode", "6713706891712556980", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{FIPSMode: lo.ToPtr(v1alpha2.FIPSModeFIPS)}}),
+		Entry("Security", "289450118275091407", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{Security: &v1alpha2.Security{EncryptionAtHost: lo.ToPtr(true)}}}),
+		Entry("ArtifactStreamingEnabled", "8557013258626834658", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{ArtifactStreamingEnabled: lo.ToPtr(true)}}),
 	)
 	It("should match static hash when reordering tags", func() {
 		nodeClass.Spec.Tags = map[string]string{"keyTag-2": "valueTag-2", "keyTag-1": "valueTag-1"}
@@ -89,6 +92,9 @@ var _ = Describe("Hash", func() {
 		Entry("ImageFamily", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{ImageFamily: lo.ToPtr("AzureLinux")}}),
 		Entry("Kubelet", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{Kubelet: &v1alpha2.KubeletConfiguration{CPUManagerPolicy: "none"}}}),
 		Entry("MaxPods", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{MaxPods: lo.ToPtr(int32(200))}}),
+		Entry("FIPSMode", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{FIPSMode: lo.ToPtr(v1alpha2.FIPSModeFIPS)}}),
+		Entry("Security", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{Security: &v1alpha2.Security{EncryptionAtHost: lo.ToPtr(true)}}}),
+		Entry("ArtifactStreamingEnabled", v1alpha2.AKSNodeClass{Spec: v1alpha2.AKSNodeClassSpec{ArtifactStreamingEnabled: lo.ToPtr(true)}}),
 	)
 	It("should not change hash when tags are changed", func() {
 		hash := nodeClass.Hash()
@@ -105,7 +111,7 @@ var _ = Describe("Hash", func() {
 	// This test is a sanity check to update the hashing version if the algorithm has been updated.
 	// Note: this will only catch a missing version update, if the staticHash hasn't been updated yet.
 	It("when hashing algorithm updates, we should update the hash version", func() {
-		currentHashVersion := "v3"
+		currentHashVersion := "v4"
 		if nodeClass.Hash() != staticHash {
 			Expect(v1alpha2.AKSNodeClassHashVersion).ToNot(Equal(currentHashVersion))
 		} else {
